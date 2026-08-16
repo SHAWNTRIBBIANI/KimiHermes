@@ -1,0 +1,45 @@
+name: kimi-claw
+label: Kimi Claw
+kind: platform
+version: 1.0.0
+description: >
+  Kimi Claw bridge for Hermes Agent — connects this Hermes instance to Kimi
+  (kimi.com) as a linked "OpenClaw-compatible" bot, using the kimi-claw
+  connector protocol (Connect-RPC over HTTPS/WebSocket, X-Kimi-Bot-Token auth).
+
+  INBOUND: receives messages sent from the Kimi app/web UI and injects them
+  into the Hermes gateway session like any other platform.
+
+  OUTBOUND: streams the agent's replies back to Kimi.
+
+  Also provides the kimi_upload_file tool (upload local files into the Kimi
+  conversation).
+
+  This is an interoperability adaptation of the official kimi-claw OpenClaw
+  plugin (v0.27.1). Protocol details reverse-engineered from the publicly
+  distributed plugin package.
+author: Hermes Kimi Claw Bridge contributors
+provides_tools:
+  - kimi_upload_file
+  - kimi_search
+  - kimi_fetch
+  - kimi_finance
+  - kimi_datasource_get_desc
+  - kimi_datasource_call
+provides_hooks:
+  - pre_tool_call
+requires_env:
+  - KIMI_CLAW_BOT_TOKEN
+optional_env:
+  - name: KIMI_CLAW_BOT_TOKEN
+    description: "Kimi Claw bot token (km_b_prod_...) from kimi.com/bot '关联已有 OpenClaw' dialog."
+    prompt: "Kimi Claw bot token"
+    password: true
+  - name: KIMI_CLAW_KIMIAPI_HOST
+    description: "Kimi API host (default https://www.kimi.com/api-claw)."
+    prompt: "Kimi API host (default https://www.kimi.com/api-claw)"
+    password: false
+  - name: KIMI_CLAW_WS_URL
+    description: "Bridge WebSocket URL (default wss://www.kimi.com/api-claw/bots/agent-ws)."
+    prompt: "Bridge WS URL (default wss://www.kimi.com/api-claw/bots/agent-ws)"
+    password: false
