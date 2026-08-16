@@ -377,6 +377,14 @@ class KimiImClient:
             "resourceLink": {"title": title, "uri": uri},
         }])
 
+    async def get_me(self) -> Optional[Dict[str, Any]]:
+        """Fetch our own bot identity (id/shortId/name/type)."""
+        try:
+            return await self._unary("GetMe", {})
+        except Exception as exc:
+            logger.warning("[kimi-claw] GetMe failed: %s", exc)
+            return None
+
     async def update_bot_meta(self) -> None:
         """Answer botReport events (best-effort, matches upstream payload)."""
         try:

@@ -184,6 +184,11 @@ class KimiClawAdapter(BasePlatformAdapter):
         self._last_chat_id: Optional[str] = None
         self._instance_id: Optional[str] = None
         self._device_id: Optional[str] = None
+        # Our own bot ids (long + short), resolved via GetMe at connect.
+        # The loop guard matches on sender identity, NOT role: in group
+        # rooms the human coordinator's messages arrive with role=assistant,
+        # so a role-based filter silently drops legitimate group traffic.
+        self._self_ids: set[str] = set()
 
     # ------------------------------------------------------------------
     # state persistence (resume via sinceId across restarts)
@@ -230,6 +235,11 @@ class KimiClawAdapter(BasePlatformAdapter):
         self._client = KimiImClient(self._token, self._kimiapi_host,
                                     skills=skills)
         await self._client.open()
+        me = await self._client.get_me()
+        if me:
+            self._self_ids = {v for v in (me.get("id"), me.get("shortId")) if v}
+            logger.info("[kimi-claw] bot identity: %s (%s)",
+                        me.get("name"), me.get("shortId"))
         self._subscribe_task = asyncio.create_task(
             self._subscribe_loop(), name="kimi-claw-subscribe")
         if self._terminal_enabled:
@@ -466,6 +476,9 @@ class KimiClawAdapter(BasePlatformAdapter):
 
         if "ping" in event:
             return
+        # Raw visibility for protocol edge cases (group rooms etc.)
+        logger.info("[kimi-claw] event: %s",
+                    json.dumps(event, ensure_ascii=False)[:600])
         if "botReport" in event:
             await self._client.update_bot_meta()
             return
@@ -474,9 +487,25 @@ class KimiClawAdapter(BasePlatformAdapter):
         if not chat_msg:
             return
         if chat_msg.get("status") != "STATUS_COMPLETED":
+            logger.info("[kimi-claw] skip chatMessage status=%s",
+                        chat_msg.get("status"))
             return
-        if chat_msg.get("role") != "user":
-            return  # never dispatch our own / other bots' messages (loop guard)
+        # Loop guard by sender identity, not role: group coordinators post
+        # as role=assistant, so role filtering drops real user traffic.
+        sender = chat_msg.get("senderId") or ""
+        sender_short = chat_msg.get("senderShortId") or ""
+        if self._self_ids and (sender in self._self_ids
+                               or sender_short in self._self_ids):
+            return  # our own message echoed back
+        if not self._self_ids and chat_msg.get("role") != "user":
+            # GetMe unavailable: conservative fallback (DM behavior)
+            logger.info("[kimi-claw] skip chatMessage role=%s (no self ids)",
+                        chat_msg.get("role"))
+            return
+        if chat_msg.get("role") not in ("user", "assistant"):
+            logger.info("[kimi-claw] skip chatMessage role=%s",
+                        chat_msg.get("role"))
+            return
 
         chat_id = chat_msg.get("chatId")
         message_id = chat_msg.get("messageId")
