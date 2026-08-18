@@ -202,7 +202,27 @@ yuandian_law, stock_finance_data`. Responses: `is_success`, assistant texts unde
 `result.assistant[*].text` (a JSON string containing `data_preview`/`notice`), files
 under `files[{name, content}]`.
 
-## 5. Hermes-side adaptation notes (v0.20.1)
+## 5. UI 状态指示器的实现（"正在思考中 / 正在使用工具 / 正在写入文件"）
+
+Kimi UI 的细粒度状态**不是独立通道**，而是从当前流式块的车道（lane）推导：
+
+| UI 状态 | 驱动来源 | 本插件实现 |
+|---|---|---|
+| 正在思考中 | think 块正在流式更新（`block.think.content`） | thinking 中继 → `update_think` |
+| 正在使用工具 / 正在写入文件 等 | tool 块出现（UI 按 `block.tool.name` 映射状态文案，如 write_file → 写入文件） | `pre_tool_call` 钩 → `add_tool_block`（发送 toolCallId/name/args，文案映射由 UI 完成） |
+| 正在打字中 / 正在输出 | text 块正在流式更新 | `update`（append 增量） |
+| 指示器常亮/熄灭 | WS 流开/关（end 帧或断开） | 单流模型：run 期间流保持开放 |
+
+实证依据：对官方云端实例的 verbose 流量抓取中，出站流只有三条 lane——
+`reasoning`（think）、`tool`、`answer`（text），**没有 StageBlock**。
+proto 里虽然存在 `StageBlock`/`MultiStageBlock`（name/duration/description/index/status，
+StageName 枚举在 kimi.chatty.v1），但那是 Kimi 主聊天产品线（chatty）使用的协议，
+Kimi Claw 桥的实际流量中不出现——状态全部由上述块车道推导。
+
+另一个实证：tool 块的 `contents[].status`（运行/完成状态迁移）两种枚举编码
+（`"running"` / `"STATUS_RUNNING"`）均被服务端断连拒绝，因此工具状态迁移无法表达，
+UI 的工具状态只能靠块的出现与流的生命周期近似。
+## 6. Hermes-side adaptation notes (v0.20.1)
 
 Three version-specific gotchas this plugin works around:
 
