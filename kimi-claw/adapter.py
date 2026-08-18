@@ -309,28 +309,46 @@ class KimiClawAdapter(BasePlatformAdapter):
         if not target:
             return SendResult(success=False, error="chat_id unavailable",
                               retryable=False)
-        # If a draft stream is open for this chat, this send() is the final
-        # frame of a streamed response: reconcile + close instead of sending
-        # a duplicate message.
+        # If a draft stream is open for this chat, decide what this send is:
         stream = self._streams.get(target)
         if stream is not None and content.startswith("💬 "):
-            # thinking_progress relay (assistant scratch text between tool
-            # calls) — forward as a think block, never as a message, and
-            # crucially do NOT let it finalize the stream.
+            # thinking_progress relay — forward as a think block, never as a
+            # message, and don't let it touch the stream lifecycle.
             asyncio.create_task(
                 self._safe_think_update(target, stream, content[2:].strip()))
             return SendResult(success=True)
-        stream = self._streams.pop(target, None)
+        if stream is not None and content.startswith("⏳"):
+            # long-running status bubble — deliver as a standalone message
+            # WITHOUT touching the stream (it is not run content), just
+            # count it as activity.
+            try:
+                mid = await self._client.send_message(target, content)
+                stream.schedule_close()  # reset the idle countdown
+                return SendResult(success=True, message_id=mid)
+            except Exception as exc:
+                return SendResult(success=False, error=str(exc),
+                                  retryable=True)
+        if stream is not None and content == stream.all_text:
+            # The gateway's run-final resend of the complete response — all
+            # of it is already on the stream. No-op, just arm the close.
+            stream.schedule_close()
+            self._last_delivered[target] = content
+            return SendResult(success=True)
         if stream is not None:
+            # Segment-final text: reconcile into the stream and keep it OPEN
+            # across segments (upstream model: one stream per run); the idle
+            # countdown closes it when the run is truly done.
             self._think_buffers.pop(target, None)
-            logger.info("[kimi-claw] finalizing draft stream chat=%s "
-                        "frames=%d", target, stream._frames_sent)
-            ok = await stream.finish(final_content=content)
-            if ok:
-                self._last_delivered[target] = content
-            return SendResult(success=ok,
-                              error=None if ok else "stream finish failed",
-                              retryable=not ok)
+            try:
+                await stream.set_segment_final(content)
+                self._last_delivered[target] = (
+                    stream.all_text or content)
+                return SendResult(success=True)
+            except Exception as exc:
+                self._streams.pop(target, None)
+                await stream.abort()
+                return SendResult(success=False, error=str(exc),
+                                  retryable=True)
         last_id = None
         try:
             for chunk in self._chunk(content):
@@ -628,6 +646,12 @@ class KimiClawAdapter(BasePlatformAdapter):
         # gateway then correctly resends the complete response fresh.
         last = self._last_delivered.get(chat_id)
         if last is not None and last.strip() == (content or "").strip():
+            # Truthful no-op — and a strong run-end signal (the gateway only
+            # reconciles after the final send), so close the stream now
+            # instead of waiting for the idle countdown.
+            stream = self._streams.pop(chat_id, None)
+            if stream is not None:
+                await stream.finish()
             return SendResult(success=True, message_id=message_id)
         return SendResult(success=False,
                           error="kimi-claw does not support message editing",

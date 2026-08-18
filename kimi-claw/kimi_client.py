@@ -425,21 +425,55 @@ class KimiStreamSender:
         self._ws = None
         self._sent_text = ""
         self._sent_think = ""
-        # Block-id choreography calibrated from a cloud-instance traffic
-        # capture: think lane uses "0", tool blocks count up from "1", the
-        # answer text block takes the next free id once text starts.
-        self._think_block_id = "0"
-        self._tool_seq = 0
-        self._block_id: Optional[str] = None  # allocated on first text frame
+        # Upstream model: ONE stream per run, one block per lane/segment.
+        # Block ids are allocated monotonically in emission order; think
+        # keeps a single lane, every text segment and tool call gets its own.
+        self._next_block_id = 0
+        self._think_block_id: Optional[str] = None
+        self._text_block_id: Optional[str] = None
+        self._segment_open = False
+        self._prev_segments_text = ""
+        self._tool_block_ids: Dict[str, str] = {}
         self._frames_sent = 0
         self._ping_task: Optional[asyncio.Task] = None
         self._idle_task: Optional[asyncio.Task] = None
+        self._close_task: Optional[asyncio.Task] = None
         self._closed = False
 
-    def _text_block_id(self) -> str:
-        if self._block_id is None:
-            self._block_id = str(self._tool_seq + 1)
-        return self._block_id
+    CLOSE_GRACE_S = 30.0
+
+    @property
+    def all_text(self) -> str:
+        """Everything delivered so far (previous segments + current)."""
+        if self._segment_open:
+            return self._prev_segments_text + self._sent_text
+        return self._prev_segments_text
+
+    def _alloc_block_id(self) -> str:
+        bid = str(self._next_block_id)
+        self._next_block_id += 1
+        return bid
+
+    def _cancel_close(self) -> None:
+        if self._close_task and not self._close_task.done():
+            self._close_task.cancel()
+        self._close_task = None
+
+    def schedule_close(self, delay: float = CLOSE_GRACE_S) -> None:
+        """Close the stream after `delay`s of no activity (run-end signal
+        we never get explicitly — segment-final sends and run-final sends
+        are indistinguishable, so the stream stays open across segments and
+        any frame/hook activity cancels the countdown)."""
+        self._cancel_close()
+        self._close_task = asyncio.create_task(self._close_after(delay))
+
+    async def _close_after(self, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            if not self._closed:
+                await self.finish()
+        except asyncio.CancelledError:
+            pass
 
     async def start(self) -> None:
         session = self._client._session
@@ -453,13 +487,30 @@ class KimiStreamSender:
         self._ping_task = asyncio.create_task(self._ping_loop())
         self._idle_task = asyncio.create_task(self._idle_watchdog())
 
+    async def _send_frame(self, frame: Dict[str, Any], kind: str) -> None:
+        await self._ws.send_str(json.dumps(frame))
+        self._frames_sent += 1
+        self._cancel_close()  # any activity means the run is still going
+        payload = frame.get("block") or {}
+        block = payload.get("block") or {}
+        content = ((block.get("text") or {}).get("content")
+                   or (block.get("think") or {}).get("content") or "")
+        logger.info("[kimi-claw] stream frame #%d kind=%s op=%s id=%s len=%d",
+                    self._frames_sent, kind, payload.get("op", "-"),
+                    block.get("id", "-"), len(content))
+
     async def update(self, content: str) -> None:
-        """Send the latest full snapshot; emits append-delta when possible."""
+        """Stream the current segment's snapshot (append-delta when possible).
+        Called repeatedly with the cumulative text of the CURRENT segment."""
         if self._closed or self._ws is None or self._ws.closed:
             raise StreamClosed("stream sender is closed")
+        if not self._segment_open:
+            self._text_block_id = self._alloc_block_id()
+            self._sent_text = ""
+            self._segment_open = True
         if content == self._sent_text:
             return
-        block_id = self._text_block_id()
+        block_id = self._text_block_id
         if self._sent_text and content.startswith(self._sent_text):
             delta = content[len(self._sent_text):]
             frame = {"block": {"op": "append", "mask": "block.text.content",
@@ -470,24 +521,38 @@ class KimiStreamSender:
                                "block": {"id": block_id,
                                          "text": {"content": content}}}}
         else:
-            # non-prefix change (segment break / rewrite): reconcile fully
+            # non-prefix change (segment rewrite): reconcile fully
             frame = {"block": {"op": "set", "mask": "block.text.content",
                                "block": {"id": block_id,
                                          "text": {"content": content}}}}
-        await self._ws.send_str(json.dumps(frame))
-        self._frames_sent += 1
+        await self._send_frame(frame, "text")
         self._sent_text = content
+
+    async def set_segment_final(self, content: str) -> None:
+        """Close out the current text segment (final reconcile) but KEEP the
+        stream open — the run continues across tool/commentary boundaries.
+        Starts the idle close countdown."""
+        if self._closed or self._ws is None or self._ws.closed:
+            raise StreamClosed("stream sender is closed")
+        if self._segment_open and content != self._sent_text:
+            await self.update(content)
+        self._prev_segments_text += self._sent_text
+        self._sent_text = ""
+        self._segment_open = False
+        self.schedule_close()
 
     async def update_think(self, content: str) -> None:
         """Forward reasoning/narration as a collapsible think block
-        (mask block.think.content, block id "0", "Reasoning:\n" prefix —
-        all matching the captured upstream convention)."""
+        (mask block.think.content, "Reasoning:\n" prefix — matching the
+        captured upstream convention)."""
         if self._closed or self._ws is None or self._ws.closed:
             raise StreamClosed("stream sender is closed")
         if content and not content.startswith("Reasoning:\n"):
             content = "Reasoning:\n" + content
         if content == self._sent_think:
             return
+        if self._think_block_id is None:
+            self._think_block_id = self._alloc_block_id()
         if self._sent_think and content.startswith(self._sent_think):
             frame = {"block": {"op": "append", "mask": "block.think.content",
                                "block": {"id": self._think_block_id,
@@ -501,8 +566,7 @@ class KimiStreamSender:
             frame = {"block": {"op": "set", "mask": "block.think.content",
                                "block": {"id": self._think_block_id,
                                          "think": {"content": content}}}}
-        await self._ws.send_str(json.dumps(frame))
-        self._frames_sent += 1
+        await self._send_frame(frame, "think")
         self._sent_think = content
 
     async def add_tool_block(self, tool_call_id: str, name: str,
@@ -520,8 +584,10 @@ class KimiStreamSender:
             raise StreamClosed("stream sender is closed")
         if status != "running":
             return  # no safe wire encoding for status updates; skip
-        self._tool_seq += 1
-        block_id = str(self._tool_seq)
+        block_id = self._tool_block_ids.get(tool_call_id)
+        if block_id is None:
+            block_id = self._alloc_block_id()
+            self._tool_block_ids[tool_call_id] = block_id
         tool: Dict[str, Any] = {
             "toolCallId": tool_call_id,
             "name": name,
@@ -530,15 +596,15 @@ class KimiStreamSender:
             tool["args"] = args_text
         frame = {"block": {"op": "set",
                            "block": {"id": block_id, "tool": tool}}}
-        await self._ws.send_str(json.dumps(frame))
-        self._frames_sent += 1
+        await self._send_frame(frame, f"tool:{name}")
 
     async def finish(self, final_content: Optional[str] = None) -> bool:
         """Reconcile final text (if given) and close the stream."""
         if self._closed:
             return True
+        self._cancel_close()
         try:
-            if final_content is not None and final_content != self._sent_text:
+            if final_content is not None and final_content != self.all_text:
                 await self.update(final_content)
             if self._ws is not None and not self._ws.closed:
                 await self._ws.send_str(json.dumps({"end": {}}))
@@ -553,13 +619,13 @@ class KimiStreamSender:
             return False
         finally:
             self._closed = True
-            for task in (self._ping_task, self._idle_task):
+            for task in (self._ping_task, self._idle_task, self._close_task):
                 if task and not task.done():
                     task.cancel()
 
     async def abort(self) -> None:
         self._closed = True
-        for task in (self._ping_task, self._idle_task):
+        for task in (self._ping_task, self._idle_task, self._close_task):
             if task and not task.done():
                 task.cancel()
         if self._ws is not None and not self._ws.closed:
