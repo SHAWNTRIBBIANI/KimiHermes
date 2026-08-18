@@ -176,6 +176,10 @@ class KimiClawAdapter(BasePlatformAdapter):
         self._forward_thinking = bool(extra.get("forward_thinking", True))
         self._forward_tool_calls = bool(extra.get("forward_tool_calls", True))
         self._think_buffers: Dict[str, str] = {}
+        # Last full text delivered per chat — lets edit_message answer the
+        # gateway's stale-finalize reconciliation truthfully (no-op when the
+        # message already says exactly this, avoiding duplicate resends).
+        self._last_delivered: Dict[str, str] = {}
 
         # Resume / dedup state
         self._last_event_id: Optional[str] = None
@@ -322,6 +326,8 @@ class KimiClawAdapter(BasePlatformAdapter):
             logger.info("[kimi-claw] finalizing draft stream chat=%s "
                         "frames=%d", target, stream._frames_sent)
             ok = await stream.finish(final_content=content)
+            if ok:
+                self._last_delivered[target] = content
             return SendResult(success=ok,
                               error=None if ok else "stream finish failed",
                               retryable=not ok)
@@ -329,6 +335,7 @@ class KimiClawAdapter(BasePlatformAdapter):
         try:
             for chunk in self._chunk(content):
                 last_id = await self._client.send_message(target, chunk)
+            self._last_delivered[target] = content
             return SendResult(success=True, message_id=last_id)
         except AuthError as exc:
             return SendResult(success=False, error=str(exc), retryable=False)
@@ -612,10 +619,16 @@ class KimiClawAdapter(BasePlatformAdapter):
 
     async def edit_message(self, chat_id: str, message_id: str,
                            content: str, **kwargs) -> SendResult:
-        # Kimi IM has no edit API; drafts are the streaming transport.  This
-        # only fires if a draft died mid-run and the consumer fell back to
-        # the edit path — report failure so the consumer degrades visibly
-        # instead of believing a stale partial was updated.
+        # Kimi IM has no edit API.  The gateway's stale-finalize
+        # reconciliation tries to edit the delivered message up to the
+        # complete response; when what it wants the message to say is
+        # exactly what we already delivered, report success (truthful
+        # no-op) so it does NOT resend the whole response as a duplicate.
+        # Only when the content genuinely differs do we fail — the
+        # gateway then correctly resends the complete response fresh.
+        last = self._last_delivered.get(chat_id)
+        if last is not None and last.strip() == (content or "").strip():
+            return SendResult(success=True, message_id=message_id)
         return SendResult(success=False,
                           error="kimi-claw does not support message editing",
                           retryable=False)
