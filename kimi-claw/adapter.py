@@ -110,8 +110,8 @@ def pre_tool_call_hook(tool_name: str = "", args: Optional[Dict] = None,
                                   "running"),
             loop,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("[kimi-claw] tool block scheduling failed: %s", exc)
     return None
 
 
@@ -311,11 +311,23 @@ class KimiClawAdapter(BasePlatformAdapter):
                               retryable=False)
         # If a draft stream is open for this chat, decide what this send is:
         stream = self._streams.get(target)
-        if stream is not None and content.startswith("💬 "):
-            # thinking_progress relay — forward as a think block, never as a
-            # message, and don't let it touch the stream lifecycle.
-            asyncio.create_task(
-                self._safe_think_update(target, stream, content[2:].strip()))
+        if stream is not None and stream._closed:
+            # Stream already ended (idle grace / abort): never lose content —
+            # drop the stale reference and fall through to plain delivery.
+            self._streams.pop(target, None)
+            stream = None
+        if content.startswith("💬 "):
+            # thinking_progress relay: with an open stream it becomes a
+            # think block; WITHOUT one it must be eaten — the same narration
+            # is already delivered as visible commentary text, and sending
+            # it as a plain message produces the observed duplicate.
+            if stream is not None:
+                asyncio.create_task(
+                    self._safe_think_update(target, stream,
+                                            content[2:].strip()))
+            else:
+                logger.info("[kimi-claw] thinking relay eaten (no open "
+                            "stream): len=%d", len(content))
             return SendResult(success=True)
         if stream is not None and content.startswith("⏳"):
             # long-running status bubble — deliver as a standalone message
@@ -331,6 +343,8 @@ class KimiClawAdapter(BasePlatformAdapter):
         if stream is not None and content == stream.all_text:
             # The gateway's run-final resend of the complete response — all
             # of it is already on the stream. No-op, just arm the close.
+            logger.info("[kimi-claw] duplicate complete-response suppressed "
+                        "chat=%s len=%d", target, len(content))
             stream.schedule_close()
             self._last_delivered[target] = content
             return SendResult(success=True)
@@ -349,6 +363,8 @@ class KimiClawAdapter(BasePlatformAdapter):
                 await stream.abort()
                 return SendResult(success=False, error=str(exc),
                                   retryable=True)
+        logger.info("[kimi-claw] plain send chat=%s len=%d", target,
+                    len(content))
         last_id = None
         try:
             for chunk in self._chunk(content):
@@ -371,6 +387,8 @@ class KimiClawAdapter(BasePlatformAdapter):
 
     async def send_draft(self, chat_id: str, draft_id: int, content: str,
                          metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        logger.info("[kimi-claw] send_draft chat=%s draft=%s len=%d",
+                    chat_id, draft_id, len(content or ""))
         if not self._client:
             return SendResult(success=False, error="not connected")
         target = chat_id or self._default_chat_id
@@ -398,6 +416,8 @@ class KimiClawAdapter(BasePlatformAdapter):
             await stream.update(content)
             return SendResult(success=True)
         except Exception as exc:
+            logger.warning("[kimi-claw] send_draft update failed: %s "
+                           "(consumer will disable drafts for this run)", exc)
             self._streams.pop(target, None)
             await stream.abort()
             return SendResult(success=False, error=str(exc))

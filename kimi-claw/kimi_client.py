@@ -438,9 +438,10 @@ class KimiStreamSender:
         self._ping_task: Optional[asyncio.Task] = None
         self._idle_task: Optional[asyncio.Task] = None
         self._close_task: Optional[asyncio.Task] = None
+        self._write_lock: Optional[asyncio.Lock] = None
         self._closed = False
 
-    CLOSE_GRACE_S = 30.0
+    CLOSE_GRACE_S = 120.0
 
     @property
     def all_text(self) -> str:
@@ -471,6 +472,7 @@ class KimiStreamSender:
         try:
             await asyncio.sleep(delay)
             if not self._closed:
+                logger.info("[kimi-claw] stream idle grace expired, closing")
                 await self.finish()
         except asyncio.CancelledError:
             pass
@@ -488,7 +490,14 @@ class KimiStreamSender:
         self._idle_task = asyncio.create_task(self._idle_watchdog())
 
     async def _send_frame(self, frame: Dict[str, Any], kind: str) -> None:
-        await self._ws.send_str(json.dumps(frame))
+        # Serialize ALL writes: tool frames arrive via thread-hopped
+        # hook tasks and race with the consumer's draft coroutine on the
+        # same loop; two send_str coroutines can interleave at drain
+        # points and corrupt frames on the wire.
+        if self._write_lock is None:
+            self._write_lock = asyncio.Lock()
+        async with self._write_lock:
+            await self._ws.send_str(json.dumps(frame))
         self._frames_sent += 1
         self._cancel_close()  # any activity means the run is still going
         payload = frame.get("block") or {}
