@@ -1,0 +1,8 @@
+name: kimi-claw-eos
+description: >
+  Closes the kimi-claw WS draft stream promptly when the agent turn ends
+  (agent:end), so the Kimi UI stops the "generating" indicator within a few
+  seconds instead of waiting for the idle-grace timeout. Written and owned
+  by the kimi-claw Hermes plugin — safe to delete with the plugin.
+events:
+  - agent:end

@@ -180,6 +180,7 @@ class KimiClawAdapter(BasePlatformAdapter):
         # gateway's stale-finalize reconciliation truthfully (no-op when the
         # message already says exactly this, avoiding duplicate resends).
         self._last_delivered: Dict[str, str] = {}
+        self._stream_msg_seq = 0
 
         # Resume / dedup state
         self._last_event_id: Optional[str] = None
@@ -352,12 +353,18 @@ class KimiClawAdapter(BasePlatformAdapter):
             # Segment-final text: reconcile into the stream and keep it OPEN
             # across segments (upstream model: one stream per run); the idle
             # countdown closes it when the run is truly done.
+            # CRITICAL: return a real-shaped message id.  The consumer maps
+            # message_id=None onto its "__no_edit__" sentinel (meant for
+            # Signal/webhook), which suppresses drafting for the ENTIRE
+            # continuation and delivers it once at the end — the root cause
+            # of post-tool text never streaming.
             self._think_buffers.pop(target, None)
             try:
                 await stream.set_segment_final(content)
                 self._last_delivered[target] = (
                     stream.all_text or content)
-                return SendResult(success=True)
+                return SendResult(success=True,
+                                  message_id=self._next_stream_msg_id())
             except Exception as exc:
                 self._streams.pop(target, None)
                 await stream.abort()
@@ -654,6 +661,15 @@ class KimiClawAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {"name": chat_id, "type": "dm"}
+
+    def _next_stream_msg_id(self) -> str:
+        """Synthetic but real-shaped id for WS-streamed segment messages
+        (the WS protocol returns no id).  Only needs to be truthy, distinct
+        per segment, and not equal to the consumer's "__no_edit__" sentinel;
+        it is passed back to us in edit_message, which we handle locally.
+        """
+        self._stream_msg_seq += 1
+        return f"kcws-{self._stream_msg_seq}-{uuid.uuid4().hex[:8]}"
 
     async def edit_message(self, chat_id: str, message_id: str,
                            content: str, **kwargs) -> SendResult:

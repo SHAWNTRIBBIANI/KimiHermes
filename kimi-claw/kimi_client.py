@@ -441,7 +441,7 @@ class KimiStreamSender:
         self._write_lock: Optional[asyncio.Lock] = None
         self._closed = False
 
-    CLOSE_GRACE_S = 120.0
+    CLOSE_GRACE_S = 60.0
 
     @property
     def all_text(self) -> str:
