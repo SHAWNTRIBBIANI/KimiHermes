@@ -347,12 +347,24 @@ def register_kimi_search_tools(ctx) -> None:
         "kimi_datasource_get_desc", "kimi-search", DATASOURCE_GET_DESC_SCHEMA,
         handle_kimi_datasource_get_desc, is_async=True, emoji="🗃️",
         description="Get the description and available APIs of a Kimi data "
-                    "source (yahoo_finance, arxiv, tianyancha, scholar, "
-                    "imf, world_bank_open_data, yuandian_law, "
-                    "stock_finance_data).")
+                    "source. Available: yahoo_finance, arxiv, "
+                    "world_bank_open_data, imf, tianyancha (中国企业工商), "
+                    "scholar, yuandian_law (中国法律), stock_finance_data "
+                    "(A股/港美实时行情), wind (A股分钟线/基金/债券/宏观EDB/自然语言选股), "
+                    "gildata (聚源：智能选股选基金/研报/公告/新闻语料), "
+                    "sec_edgar (美股 SEC 财报 10-K/10-Q/XBRL/内部人交易/13F持仓), "
+                    "sp_data (S&P Capital IQ：美股一致预期/估值/股东/高管/电话会纪要).")
     ctx.register_tool(
         "kimi_datasource_call", "kimi-search", DATASOURCE_CALL_SCHEMA,
         handle_kimi_datasource_call, is_async=True, emoji="🗃️",
         description="Call an API of a Kimi data source. Use "
                     "kimi_datasource_get_desc first to discover available "
-                    "API names and parameters.")
+                    "API names and parameters. Routing hints: US SEC filings "
+                    "and balance sheets -> sec_edgar; institutional US "
+                    "fundamentals/estimates -> sp_data; A-share/funds/bonds/"
+                    "macro and natural-language stock screening -> wind; "
+                    "broker research/announcements/news -> gildata; CN "
+                    "company registry -> tianyancha; CN law -> yuandian_law; "
+                    "papers -> arxiv/scholar; global macro -> imf/"
+                    "world_bank_open_data; realtime stock quotes -> "
+                    "stock_finance_data.")
