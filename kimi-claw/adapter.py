@@ -176,6 +176,10 @@ class KimiClawAdapter(BasePlatformAdapter):
         self._forward_thinking = bool(extra.get("forward_thinking", True))
         self._forward_tool_calls = bool(extra.get("forward_tool_calls", True))
         self._think_buffers: Dict[str, str] = {}
+        # Presence indicator: open a WS stream (placeholder think block) the
+        # instant a message arrives, so the Kimi UI immediately shows the
+        # "generating" state instead of staying silent until first content.
+        self._presence_indicator = bool(extra.get("presence_indicator", True))
         # Last full text delivered per chat — lets edit_message answer the
         # gateway's stale-finalize reconciliation truthfully (no-op when the
         # message already says exactly this, avoiding duplicate resends).
@@ -402,8 +406,15 @@ class KimiClawAdapter(BasePlatformAdapter):
         if not target:
             return SendResult(success=False, error="chat_id unavailable")
         stream = self._streams.get(target)
-        if stream is not None and (stream._draft_id != draft_id
-                                   or stream._closed):
+        if stream is not None and stream._placeholder:
+            # Adopt the presence stream created at message receipt instead
+            # of opening a second stream for the same run.
+            stream._placeholder = False
+            stream._draft_id = draft_id
+            logger.info("[kimi-claw] presence stream adopted chat=%s "
+                        "draft=%s", target, draft_id)
+        elif stream is not None and (stream._draft_id != draft_id
+                                     or stream._closed):
             # a new response started before the old one finalized, or the
             # previous stream already closed (e.g. early segment finalize)
             await stream.abort()
@@ -632,7 +643,42 @@ class KimiClawAdapter(BasePlatformAdapter):
         )
         logger.info("[kimi-claw] inbound message chat=%s user=%s len=%d media=%d",
                     chat_id, sender_id, len(text), len(media_urls))
+        if self._presence_indicator:
+            await self._start_presence(str(chat_id))
         await self.handle_message(event_obj)
+
+    # ------------------------------------------------------------------
+    # presence indicator: light the "generating" state on receipt
+    # ------------------------------------------------------------------
+    async def _start_presence(self, chat_id: str) -> None:
+        """Open a draft stream with a placeholder think block the moment a
+        message arrives.  The run's first send_draft adopts this stream; if
+        nothing ever streams, the idle close countdown cleans it up."""
+        if not self._client:
+            return
+        try:
+            existing = self._streams.get(chat_id)
+            if existing is not None and not existing._closed:
+                if existing._placeholder:
+                    return  # already announcing
+                # A live response stream is running — nothing to add.
+                return
+            stream = KimiStreamSender(self._client, chat_id)
+            stream._draft_id = -1  # not bound to any consumer run yet
+            stream._placeholder = True
+            try:
+                await stream.start()
+            except Exception as exc:
+                logger.warning("[kimi-claw] presence stream start failed: %s",
+                               exc)
+                return
+            self._streams[chat_id] = stream
+            await stream.update_think("收到，正在思考…")
+            # presence bubble must not linger forever on its own
+            stream.schedule_close(120.0)
+            logger.info("[kimi-claw] presence indicator on chat=%s", chat_id)
+        except Exception as exc:
+            logger.debug("[kimi-claw] presence indicator failed: %s", exc)
 
     # ------------------------------------------------------------------
     # media download

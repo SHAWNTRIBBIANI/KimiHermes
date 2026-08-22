@@ -440,6 +440,9 @@ class KimiStreamSender:
         self._close_task: Optional[asyncio.Task] = None
         self._write_lock: Optional[asyncio.Lock] = None
         self._closed = False
+        # Presence placeholder: stream opened at message receipt (before any
+        # draft) purely to light the UI's generating indicator immediately.
+        self._placeholder = False
 
     CLOSE_GRACE_S = 60.0
 
@@ -540,10 +543,17 @@ class KimiStreamSender:
     async def set_segment_final(self, content: str) -> None:
         """Close out the current text segment (final reconcile) but KEEP the
         stream open — the run continues across tool/commentary boundaries.
-        Starts the idle close countdown."""
+        Starts the idle close countdown.  When no segment is open (e.g. a
+        presence stream where the run's reply arrived via plain send before
+        any draft), the content is appended as a fresh segment instead of
+        being dropped."""
         if self._closed or self._ws is None or self._ws.closed:
             raise StreamClosed("stream sender is closed")
-        if self._segment_open and content != self._sent_text:
+        if self._segment_open:
+            if content != self._sent_text:
+                await self.update(content)
+        elif content:
+            # No segment open yet: this send IS the segment's content.
             await self.update(content)
         self._prev_segments_text += self._sent_text
         self._sent_text = ""

@@ -242,7 +242,13 @@ async def handle_kimi_fetch(args, **_kw) -> str:
                                extra_headers={"Accept": "text/markdown"},
                                text=True)
         except Exception as exc:
-            return f"Error: fetch failed: {exc}"
+            msg = str(exc)
+            hint = ""
+            if "security_risk" in msg or "403" in msg or "500" in msg:
+                hint = (" (Kimi fetch service blocked/failed this URL — "
+                        "do NOT retry it; fetch the page directly with the "
+                        "terminal tool instead, e.g. curl)")
+            return f"Error: fetch failed: {msg}{hint}"
 
 
 def _extract_texts(items) -> list:
