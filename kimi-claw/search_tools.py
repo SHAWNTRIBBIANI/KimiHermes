@@ -37,6 +37,11 @@ DATA_SOURCE_NAMES = [
     "scholar",
     "yuandian_law",
     "stock_finance_data",
+    # Added by Kimi after 0.1.15 (verified 2026-08):
+    "wind",
+    "gildata",
+    "sec_edgar",
+    "sp_data",
 ]
 
 SEARCH_SCHEMA = {
