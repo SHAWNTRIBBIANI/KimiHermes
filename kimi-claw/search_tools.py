@@ -327,6 +327,51 @@ async def handle_kimi_datasource_call(args, **_kw) -> str:
     })
 
 
+# ----------------------------------------------------------------------
+# Named alias tools — deterministic discovery for the post-0.1.15 sources.
+# tool_search can't find "kimi_datasource_call" by source keywords, so give
+# each new source its own searchable name.
+# ----------------------------------------------------------------------
+ALIAS_SOURCES = {
+    "kimi_sec_edgar": (
+        "sec_edgar",
+        "SEC EDGAR filings for US-listed companies: 10-K/10-Q full financial "
+        "statements (balance sheet, income statement, cash flow), XBRL "
+        "metric time series, insider trades (Form 4), institutional 13F "
+        "holdings, 8-K company events, filing list. Use for questions like "
+        "'AAPL/MSFT/TSLA latest 10-K balance sheet'.",
+    ),
+    "kimi_wind": (
+        "wind",
+        "Wind financial data: A-share minute/daily OHLCV, funds, bonds, "
+        "macro EDB (CPI/PPI/GDP/PMI/social financing/exports/unemployment), "
+        "financial indicators (PE/PB/ROE/market cap), technicals, "
+        "natural-language stock/fund screening.",
+    ),
+    "kimi_gildata": (
+        "gildata",
+        "Gildata (Juyuan) natural-language financial data: smart stock/fund/"
+        "fund-manager screening, broker research reports, A-share "
+        "announcements, news and public-opinion corpus.",
+    ),
+    "kimi_sp_data": (
+        "sp_data",
+        "S&P Capital IQ institutional US equity data: analyst consensus "
+        "estimates (EPS/revenue/EBITDA forecasts), valuation ratios, "
+        "competitors, top owners/executives, earnings-call transcripts, "
+        "M&A transactions, topic tags.",
+    ),
+}
+
+
+def _make_alias_handler(source_name):
+    async def _handler(args, **_kw):
+        args = dict(args or {})
+        args["data_source_name"] = source_name
+        return await handle_kimi_datasource_call(args)
+    return _handler
+
+
 def register_kimi_search_tools(ctx) -> None:
     ctx.register_tool(
         "kimi_search", "kimi-search", SEARCH_SCHEMA, handle_kimi_search,
@@ -368,3 +413,20 @@ def register_kimi_search_tools(ctx) -> None:
                     "papers -> arxiv/scholar; global macro -> imf/"
                     "world_bank_open_data; realtime stock quotes -> "
                     "stock_finance_data.")
+    for alias, (source, desc) in ALIAS_SOURCES.items():
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "api_name": {"type": "string",
+                             "description": f"API name of the {source} data "
+                                            "source (discover via "
+                                            "kimi_datasource_get_desc)."},
+                "params": {"type": "object",
+                           "description": "Parameters for the API call."},
+            },
+            "required": ["api_name"],
+        }
+        ctx.register_tool(alias, "kimi-search", schema,
+                          _make_alias_handler(source), is_async=True,
+                          emoji="🗃️", description=desc)

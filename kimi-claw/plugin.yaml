@@ -1,7 +1,7 @@
 name: kimi-claw
 label: Kimi Claw
 kind: platform
-version: 1.0.0
+version: 0.1.0
 description: >
   Kimi Claw bridge for Hermes Agent — connects this Hermes instance to Kimi
   (kimi.com) as a linked "OpenClaw-compatible" bot, using the kimi-claw
@@ -18,7 +18,7 @@ description: >
   This is an interoperability adaptation of the official kimi-claw OpenClaw
   plugin (v0.27.1). Protocol details reverse-engineered from the publicly
   distributed plugin package.
-author: Hermes Kimi Claw Bridge contributors
+author: Hermes adaptation (based on Moonshot kimi-claw plugin)
 provides_tools:
   - kimi_upload_file
   - kimi_search
@@ -26,6 +26,10 @@ provides_tools:
   - kimi_finance
   - kimi_datasource_get_desc
   - kimi_datasource_call
+  - kimi_sec_edgar
+  - kimi_wind
+  - kimi_gildata
+  - kimi_sp_data
 provides_hooks:
   - pre_tool_call
 requires_env:
